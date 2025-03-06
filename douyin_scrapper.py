@@ -1,13 +1,22 @@
 import json
-import time
+import os
 import cv2
 import pandas as pd
 import random
 import requests
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
+import asyncio
+from playwright.async_api import async_playwright
 
-douyin_user_url = "https://www.douyin.com/user/MS4wLjABAAAALkD0tV6Gzec7ZIDlNOmYN7QzI0cbM99GTW85f9tRsb2XO8daOKZZMxE8xE4mROTM?from_tab_name=main"
+douyin_user_urls = [
+    "https://www.douyin.com/user/MS4wLjABAAAAHjSVIy-JGVnwh7PrKuFHouXU1O5i5XJkidAbbRVdSioZItx-w5TAxEm9S_NF4kdh?from_tab_name=main",
+    "https://www.douyin.com/user/MS4wLjABAAAA64vQ3DNFO4alSxAa8u3NqThgSC4fQ9Rh-csIhrDuCJs",
+    "https://www.douyin.com/user/MS4wLjABAAAAgl2aY8rp7cov7E8B36n9i-tLQ6NA6vGNnyrqZlvjJPs",
+    "https://www.douyin.com/user/MS4wLjABAAAAxiyBtucx36aFQJgLLvZz42LdEZPAABh-H_JwBa1_HZsDcPyRvcuJDNRd2XH5I458",
+    "https://www.douyin.com/user/MS4wLjABAAAA8vUtKe2o8p5acbn6adU0rNbhBn5a-P-t4DXCx6PrP7c"
+]
+
 
 from skimage.metrics import structural_similarity as ssim
 
@@ -35,11 +44,17 @@ def download_captcha_image(image_url, save_path, target_size):
     cv2.imwrite(save_path, img_resized)
     print(f"✅ Resized CAPTCHA image to match rendered size: {target_size}")
 
-def get_slider_distance(iframe):
+async def get_slider_distance(iframe):
     """Downloads CAPTCHA images, rescales them, and detects the puzzle slot using SSIM for improved accuracy."""
-    bg_image_url = iframe.locator("#captcha_verify_image").get_attribute("src")
-    piece_image_url = iframe.locator(".captcha-verify-image-slide").get_attribute("src")
     
+    # ✅ Fix: Await get_attribute() to get the actual URL
+    bg_image_url = await iframe.locator("#captcha_verify_image").get_attribute("src")
+    piece_image_url = await iframe.locator(".captcha-verify-image-slide").get_attribute("src")
+    
+    if not bg_image_url or not piece_image_url:
+        print("❌ CAPTCHA images not found!")
+        return None
+
     bg_image_path = "captcha_bg.png"
     piece_image_path = "captcha_piece.png"
     
@@ -86,37 +101,35 @@ def get_slider_distance(iframe):
     
     return target_x
 
-def solve_captcha(page):
+async def solve_captcha(page):
     """Handles and solves the CAPTCHA inside an iframe."""
     try:
         print("[INFO] Checking for CAPTCHA iframe...")
         
         # Wait for iframe to load
-        iframe = page.wait_for_selector("iframe[src*='verifycenter']", timeout=15000)
+        iframe = await page.wait_for_selector("iframe[src*='verifycenter']", timeout=0)
         if not iframe:
             print("❌ CAPTCHA iframe not found!")
             return
         
         print("[INFO] CAPTCHA iframe detected. Switching context...")
         
-        # Switch to the iframe
-        captcha_frame = iframe.content_frame()
+        # ✅ Fix: Await content_frame() to get the correct iframe content
+        captcha_frame = await iframe.content_frame()
         if not captcha_frame:
             print("❌ Failed to retrieve iframe content!")
             return
         
         # Wait for slider button inside iframe
-        slider = captcha_frame.locator(".captcha-slider-btn")
-        captcha_frame.wait_for_selector(".captcha-slider-btn", state="visible", timeout=10000)
-        
-        if not slider.is_visible():
+        slider = await captcha_frame.wait_for_selector(".captcha-slider-btn", state="visible", timeout=10000)
+        if not slider:
             print("❌ Slider button not found!")
             return
         
         print("✅ Slider button detected!")
         
         # Detect the correct distance to move the slider
-        distance = get_slider_distance(captcha_frame)
+        distance = await get_slider_distance(captcha_frame)
 
         print(f"✅ Detected distance is {distance}")
         
@@ -128,7 +141,7 @@ def solve_captcha(page):
         
         # Perform slider dragging inside the iframe
         print("[INFO] Moving slider...")
-        box = slider.bounding_box()
+        box = await slider.bounding_box()
         if not box:
             print("❌ Could not retrieve slider position!")
             return
@@ -138,73 +151,134 @@ def solve_captcha(page):
         
         print(f"[DEBUG] Moving slider from ({start_x}, {start_y}) to ({target_x}, {start_y})")
         
-        page.mouse.move(start_x, start_y)
-        page.mouse.down()
+        await page.mouse.move(start_x, start_y)
+        await page.mouse.down()
         
         # Move the slider in small steps to simulate human behavior
         for step in range(10):
             step_x = start_x + ((target_x - start_x) * (step + 1) / 10)
-            page.mouse.move(step_x, start_y)
+            await page.mouse.move(step_x, start_y)
             print(f"[DEBUG] Slider moved to: ({step_x}, {start_y})")
-            time.sleep(random.uniform(0.05, 0.15))
+            await asyncio.sleep(random.uniform(0.05, 0.15))
         
-        page.mouse.move(target_x, start_y)
-        page.mouse.up()
+        await page.mouse.move(target_x, start_y)
+        await page.mouse.up()
         
         print("✅ CAPTCHA Solved!")
     
     except Exception as e:
         print(f"❌ CAPTCHA solving failed: {e}")
 
-def get_clean_html(page):
-    try:
-        print("[INFO] Waiting for page to fully render...")
+async def get_real_video_url(video_page_url):
+    """Fetches the real video URL from a Douyin video page."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(video_page_url, timeout=60000)
         
-        # Wait for the specific div element with class 'C1cxu0Vq' to appear
-        page.wait_for_selector("div.C1cxu0Vq", timeout=60000)
-        page.wait_for_selector("ul.q438d7I8", timeout=60000)
+        await page.wait_for_selector("video", timeout=10000)
+        video_url = await page.evaluate("document.querySelector('video').src")
         
-        rendered_html = page.content()
-        
-        # Use BeautifulSoup to remove script and style tags
-        soup = BeautifulSoup(rendered_html, "html.parser")
-        for script in soup(["script", "style"]):
-            script.decompose()
-        
-        clean_html = soup.prettify()
-        
-        # Save cleaned page content to a file
-        with open("douyin_cleaned.html", "w", encoding="utf-8") as file:
-            file.write(clean_html)
-        print("✅ Cleaned page content saved to douyin_cleaned.html")
-    except Exception as e:
-        print(f"❌ Error fetching Douyin cleaned page data: {e}")
+        await browser.close()
+        return video_url if video_url else "N/A"
 
-def scrape_douyin_profile():
-    """Scrapes Douyin profile details."""
-    print("[INFO] Starting profile scrape...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False, slow_mo=500, args=["--disable-blink-features=AutomationControlled"])
-        page = browser.new_page()
-        page.set_default_timeout(10000)
-        page.set_default_navigation_timeout(30000)
-        print(f"[INFO] Navigating to {douyin_user_url}")
-        page.goto(douyin_user_url, timeout=60000)
+async def extract_profile_data(page, username):
+    """Extracts profile and post data from the cleaned HTML and stores all profiles in a single JSON file."""
+    
+    print(f"[INFO] Extracting profile data for {username}...")
+
+    await page.wait_for_selector("div.C1cxu0Vq", timeout=6000000)
+    await page.wait_for_selector("ul.q438d7I8", timeout=6000000)
+
+    rendered_html = await page.content()
+    soup = BeautifulSoup(rendered_html, "html.parser")
+
+    profile_data = {
+        "profile_name": soup.find("h1", class_="GMEdHsXq").text.strip() if soup.find("h1", class_="GMEdHsXq") else "N/A",
+        "profile_bio": soup.find("span", class_="arnSiSbK").text.strip() if soup.find("span", class_="arnSiSbK") else "N/A",
+        "follower_count": soup.find_all("div", class_="C1cxu0Vq")[1].text.strip() if len(soup.find_all("div", class_="C1cxu0Vq")) > 1 else "N/A",
+    }
+
+    posts = []
+    post_elements = soup.find_all("li", class_="wqW3g_Kl")[:50]  # Limit to first 50 posts
+
+    for post in post_elements:
+        post_data = {
+            "post_text": post.find("p", class_="H4IE9Xgd").text.strip() if post.find("p", class_="H4IE9Xgd") else "N/A",
+            "post_url": post.find("a", class_="IdxE71f8")["href"] if post.find("a", class_="IdxE71f8") else "N/A",
+            "post_image": post.find("div", class_="oyfanDG1").find("img")["src"] if post.find("div", class_="oyfanDG1") and post.find("div", class_="oyfanDG1").find("img") else "N/A",
+            "likes": post.find("span", class_="BgCg_ebQ").text.strip() if post.find("span", class_="BgCg_ebQ") else "N/A",
+        }
+        posts.append(post_data)
+
+    final_data = {
+        "profile": profile_data,
+        "posts": posts
+    }
+
+    # ✅ Read existing JSON file if available
+    output_file = "douyin_profiles.json"
+    if os.path.exists(output_file):
+        with open(output_file, "r", encoding="utf-8") as json_file:
+            try:
+                all_profiles = json.load(json_file)
+            except json.JSONDecodeError:
+                all_profiles = {}  # Reset if file is corrupted
+    else:
+        all_profiles = {}
+
+    # ✅ Add new profile data under the username key
+    all_profiles[username] = final_data
+
+    # ✅ Save back to file
+    with open(output_file, "w", encoding="utf-8") as json_file:
+        json.dump(all_profiles, json_file, ensure_ascii=False, indent=4)
+
+    print(f"✅ Profile for {username} added to {output_file}")
+
+# def download_video(video_url, filename):
+#     """Downloads a video from a URL."""
+#     try:
+#         response = requests.get(video_url, stream=True)
+#         if response.status_code == 200:
+#             with open(filename, "wb") as file:
+#                 for chunk in response.iter_content(chunk_size=1024):
+#                     file.write(chunk)
+#             print(f"✅ Video downloaded successfully as {filename}")
+#         else:
+#             print(f"❌ Failed to download video. HTTP Status: {response.status_code}")
+#     except Exception as e:
+#         print(f"❌ Video download failed: {e}")
+    
+async def scrape_douyin_profile(douyin_url):
+    """Scrapes a single Douyin profile."""
+    print(f"[INFO] Scraping profile: {douyin_url}")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        page = await browser.new_page()
+        await page.goto(douyin_url, timeout=60000)
+        
         try:
-            if "captcha" in page.content():
+            if "captcha" in await page.content():
                 print("⚠️ CAPTCHA Detected! Solving...")
-                solve_captcha(page)
-            page.wait_for_selector("h1", state="attached", timeout=30000)
-            username = page.locator("h1").inner_text()
+                await solve_captcha(page)
+            
+            await page.wait_for_selector("h1", state="attached", timeout=60000000)
+            username = await page.locator("h1").inner_text()
             print(f"✅ Username: {username}")
-            get_clean_html(page)
+            await extract_profile_data(page, username)
         except Exception as e:
             print(f"❌ Failed to extract profile: {e}")
-
         finally:
-            browser.close()
+            await browser.close()
 
 # ✅ Run Scraper
 print("[INFO] Running profile scraper...")
-profile_data = scrape_douyin_profile()
+async def main():
+    """Runs multiple profile scrapers in parallel."""
+    tasks = [scrape_douyin_profile(url) for url in douyin_user_urls]
+    await asyncio.gather(*tasks)  # Run all tasks concurrently
+
+if __name__ == "__main__":
+    asyncio.run(main())
 print("[INFO] Scraping completed!")

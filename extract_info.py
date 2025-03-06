@@ -64,20 +64,9 @@ os.makedirs(video_dir, exist_ok=True)
 for post in post_elements:
     post_text = post.find("p", class_="H4IE9Xgd")
     post_url = post.find("a", class_="IdxE71f8")
-    post_image = post.find("div", class_="oyfanDG1").findChild("img")
+    post_image = post.find("div", class_="oyfanDG1").find("img")
     post_video = post.find("video", class_="post-video-class")
     post_likes = post.find("span", class_="BgCg_ebQ")
-
-    video_page_url = f"https://www.douyin.com{post_url['href']}"
-    real_video_url = get_real_video_url(video_page_url)
-
-    print(real_video_url, "Video url")
-
-    if real_video_url:
-      print(f"Real Video URL: {real_video_url}")
-      download_video(real_video_url)
-    else:
-        print("Failed to find video URL.")
 
     posts.append({
         "post_text": post_text.text.strip() if post_text else "N/A",
